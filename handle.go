@@ -17,9 +17,9 @@ func kindAndPointer(v reflect.Value) (reflect.Kind, unsafe.Pointer) {
 		}
 		switch kind := v.Kind(); kind {
 		case reflect.Slice, reflect.Map:
-			return kind, unsafe.Pointer(v.Pointer())
+			return kind, unsafe.Pointer(v.Elem().Pointer())
 		default:
-			return kind, unsafe.Pointer(packPointer(v).Pointer())
+			return kind, unsafe.Pointer(v.Pointer())
 		}
 	}
 	switch kind := v.Kind(); kind {

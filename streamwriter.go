@@ -5,12 +5,14 @@ import (
 	"fmt"
 	"io"
 	"reflect"
+	"unicode"
 	"unsafe"
 )
 
 type StreamWriter struct {
 	io.Writer
-	handleMap map[unsafe.Pointer]refElem
+	handleMap        map[unsafe.Pointer]refElem
+	classNameHolders map[string]struct{}
 }
 
 type WriteObjecter interface {
@@ -18,19 +20,29 @@ type WriteObjecter interface {
 }
 
 type Field struct {
-	Name      string
-	Typ       reflect.Type
-	ClassName string
+	Name string
+	Typ  reflect.Type
 }
 
-func NewStream(w io.Writer) (*StreamWriter, error) {
+func NewStreamWriter(w io.Writer) (*StreamWriter, error) {
 	stream := &StreamWriter{
-		Writer: w,
+		Writer:           w,
+		handleMap:        map[unsafe.Pointer]refElem{},
+		classNameHolders: make(map[string]struct{}),
 	}
 	if err := stream.writeHeader(); err != nil {
 		return nil, err
 	}
 	return stream, nil
+}
+
+func (stream *StreamWriter) classNameHolder(className string) struct{} {
+	holder, ok := stream.classNameHolders[className]
+	if !ok {
+		holder = struct{}{}
+		stream.classNameHolders[className] = holder
+	}
+	return holder
 }
 
 func (stream *StreamWriter) writeBinary(values ...interface{}) error {
@@ -54,8 +66,23 @@ func (stream *StreamWriter) writeRefOr(object interface{}, f func() error) error
 }
 
 func (stream *StreamWriter) writeObject(object interface{}) error {
+	v := unpackPointer(reflect.ValueOf(object))
+	if !v.IsValid() {
+		return stream.writeBinary(TcNull)
+	}
+	code := typeCode(unpackPointerType(v.Type()))
+	if code != '[' && code != 'L' {
+		return stream.writeBinary(v.Interface())
+	}
 	return stream.writeRefOr(object, func() error {
-		return stream.newObject(object)
+		switch code {
+		case 'L':
+			return stream.newObject(object)
+		case '[':
+			return stream.newArray(object)
+		default:
+			return fmt.Errorf("cannot serialize type: %T", object)
+		}
 	})
 }
 
@@ -67,7 +94,7 @@ func (stream *StreamWriter) newObject(object interface{}) error {
 		return err
 	}
 	stream.newHandle(object)
-	return nil
+	return stream.classData(object)
 }
 
 func super(object interface{}) interface{} {
@@ -81,7 +108,10 @@ func super(object interface{}) interface{} {
 }
 
 func (stream *StreamWriter) classDesc(object interface{}) error {
-	return stream.writeRefOr(object, func() error {
+	if object == nil {
+		return stream.writeBinary(TcNull)
+	}
+	return stream.writeRefOr(stream.classNameHolder(className(object)), func() error {
 		return stream.newClassDesc(object)
 	})
 }
@@ -89,6 +119,11 @@ func (stream *StreamWriter) classDesc(object interface{}) error {
 func (stream *StreamWriter) writeUTF(s string) error {
 	p := []byte(s)
 	return stream.writeBinary(uint16(len(p)), p)
+}
+
+func (stream *StreamWriter) writeLongUTF(s string) error {
+	p := []byte(s)
+	return stream.writeBinary(uint64(len(p)), p)
 }
 
 func className(object interface{}) string {
@@ -121,7 +156,7 @@ func (stream *StreamWriter) newClassDesc(object interface{}) error {
 	if err := stream.writeBinary(serialVersionUID(object)); err != nil {
 		return err
 	}
-	stream.newHandle(object)
+	stream.newHandle(stream.classNameHolder(className(object)))
 	if err := stream.classDescInfo(object); err != nil {
 		return err
 	}
@@ -139,6 +174,9 @@ func classDescFlags(object interface{}) (flags byte) {
 	flags |= ScSerializable
 	if writeObjecter(object) != nil {
 		flags |= ScWriteMethod
+	}
+	if sup := super(object); sup != nil {
+		flags |= classDescFlags(sup)
 	}
 	// TODO: Enum?...
 	return flags
@@ -168,20 +206,17 @@ func (stream *StreamWriter) fields(object interface{}) error {
 	numField := v.NumField()
 	fields := make([]Field, 0, numField)
 	for i := 0; i < numField; i++ {
-		f := v.Field(i)
-		ft := f.Type()
-		ftf := ft.Field(i)
+		t := v.Type()
+		tf := t.Field(i)
 		// Skip unexported fields.
-		if ftf.PkgPath != "" {
+		if tf.PkgPath != "" {
 			continue
 		}
 		// TODO: optimization.
-		fieldName := ftf.Name
-		javaClassName := className(reflect.New(ft).Interface())
+		fieldName := lowerCamelCase(tf.Name)
 		fields = append(fields, Field{
-			Name:      fieldName,
-			Typ:       ft,
-			ClassName: javaClassName,
+			Name: fieldName,
+			Typ:  unpackPointerType(tf.Type),
 		})
 	}
 	if err := stream.writeBinary(int16(len(fields))); err != nil {
@@ -195,9 +230,112 @@ func (stream *StreamWriter) fields(object interface{}) error {
 	return nil
 }
 
+func lowerCamelCase(name string) string {
+	runes := []rune(name)
+	if len(runes) > 0 {
+		runes[0] = unicode.ToLower(runes[0])
+	}
+	return string(runes)
+}
+
 func (stream *StreamWriter) fieldDesc(field Field) error {
+	typeCode := typeCode(field.Typ)
+	if err := stream.writeBinary(typeCode); err != nil {
+		return err
+	}
+	if err := stream.writeUTF(field.Name); err != nil {
+		return err
+	}
+	switch typeCode {
+	case 'L', '[':
+		return stream.writeString(fieldDescriptor(field.Typ))
+	}
+	return nil
+}
+
+func (stream *StreamWriter) classAnnotation(object interface{}) error {
+	// TODO
+	return stream.writeBinary(TcEndblockdata)
+}
+
+func (stream *StreamWriter) superClassDesc(object interface{}) error {
+	return stream.classDesc(super(object))
+}
+
+func (stream *StreamWriter) writeString(s string) error {
+	return stream.writeRefOr(s, func() error {
+		p := []byte(s)
+		l := len(p)
+		if l <= 0xFFFF {
+			if err := stream.writeBinary(TcString); err != nil {
+				return err
+			}
+			stream.newHandle(s)
+			return stream.writeUTF(s)
+		}
+		if err := stream.writeBinary(TcLongstring); err != nil {
+			return err
+		}
+		stream.newHandle(s)
+		return stream.writeLongUTF(s)
+	})
+}
+
+func (stream *StreamWriter) classData(object interface{}) error {
+	flags := classDescFlags(object)
+	if flags&ScSerializable != 0 {
+		if flags&ScWriteMethod == 0 {
+			return stream.nowrclass(object)
+		}
+	}
+	return fmt.Errorf("classData: flags %d not supported", int(flags))
+}
+
+func (stream *StreamWriter) nowrclass(object interface{}) error {
+	v := unpackPointer(reflect.ValueOf(object))
+	if v.Kind() != reflect.Struct {
+		return fmt.Errorf("fields: object must be a struct")
+	}
+	numField := v.NumField()
+	for i := 0; i < numField; i++ {
+		t := v.Type()
+		tf := t.Field(i)
+		// Skip unexported fields.
+		if tf.PkgPath != "" {
+			continue
+		}
+		f := v.Field(i)
+		if err := stream.writeObject(f.Interface()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (stream *StreamWriter) newArray(object interface{}) error {
+	array := NewArray(object)
+	if err := stream.writeBinary(TcArray); err != nil {
+		return err
+	}
+	if err := stream.classDesc(array); err != nil {
+		return err
+	}
+	stream.newHandle(object)
+	l := array.Len()
+	if err := stream.writeBinary(int32(l)); err != nil {
+		return err
+	}
+	for i := 0; i < l; i++ {
+		if err := stream.writeObject(array.Index(i)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func typeCode(typ reflect.Type) byte {
 	var typeCode byte
-	switch kind := field.Typ.Kind(); kind {
+	switch kind := typ.Kind(); kind {
 	case reflect.Uint8:
 		typeCode = 'B'
 	// TODO: char?
@@ -218,18 +356,21 @@ func (stream *StreamWriter) fieldDesc(field Field) error {
 	case reflect.Struct:
 		typeCode = 'L'
 	default:
-		return fmt.Errorf("fieldDesc: unsupported kind: %s", kind.String())
 	}
-	if err := stream.writeBinary(typeCode); err != nil {
-		return err
-	}
-	if err := stream.writeUTF(field.Name); err != nil {
-		return err
-	}
-	switch typeCode {
-	case '[':
+	return typeCode
+}
 
-	case 'L':
-
+func fieldDescriptor(typ reflect.Type) string {
+	code := string(typeCode(typ))
+	switch code {
+	case "L":
+		return code + classNameFromTyp(typ) + ";"
+	case "[":
+		return code + fieldDescriptor(unpackPointerType(typ.Elem()))
 	}
+	return code
+}
+
+func classNameFromTyp(typ reflect.Type) string {
+	return className(reflect.New(typ).Interface())
 }

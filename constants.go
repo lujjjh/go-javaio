@@ -3,7 +3,7 @@ package javaio
 // The following symbols in `java.io.ObjectStreamConstants` define
 // the terminal and constant values expected in a stream.
 const (
-	StreamMagic      int16 = 0xaced
+	StreamMagic      uint16 = 0xaced
 	StreamVersion    int16 = 5
 	TcNull           byte  = 0x70
 	TcReference      byte  = 0x71
