@@ -5,14 +5,19 @@ import (
 	"fmt"
 	"io"
 	"reflect"
+	"strings"
 	"unicode"
 	"unsafe"
 )
 
+type classNameHolder struct {
+	ClassName string
+}
+
 type StreamWriter struct {
 	io.Writer
 	handleMap        map[unsafe.Pointer]refElem
-	classNameHolders map[string]struct{}
+	classNameHolders map[string]*classNameHolder
 }
 
 type WriteObjecter interface {
@@ -28,7 +33,7 @@ func NewStreamWriter(w io.Writer) (*StreamWriter, error) {
 	stream := &StreamWriter{
 		Writer:           w,
 		handleMap:        map[unsafe.Pointer]refElem{},
-		classNameHolders: make(map[string]struct{}),
+		classNameHolders: make(map[string]*classNameHolder),
 	}
 	if err := stream.writeHeader(); err != nil {
 		return nil, err
@@ -40,10 +45,12 @@ func (stream *StreamWriter) WriteObject(object interface{}) error {
 	return stream.writeObject(object)
 }
 
-func (stream *StreamWriter) classNameHolder(className string) struct{} {
+func (stream *StreamWriter) classNameHolder(className string) *classNameHolder {
 	holder, ok := stream.classNameHolders[className]
 	if !ok {
-		holder = struct{}{}
+		holder = &classNameHolder{
+			ClassName: className,
+		}
 		stream.classNameHolders[className] = holder
 	}
 	return holder
@@ -217,7 +224,12 @@ func (stream *StreamWriter) fields(object interface{}) error {
 			continue
 		}
 		// TODO: optimization.
-		fieldName := lowerCamelCase(tf.Name)
+		var fieldName string
+		if tag := tf.Tag.Get("javaio"); tag != "" {
+			fieldName = tag
+		} else {
+			fieldName = lowerCamelCase(tf.Name)
+		}
 		fields = append(fields, Field{
 			Name: fieldName,
 			Typ:  unpackPointerType(tf.Type),
@@ -368,7 +380,7 @@ func fieldDescriptor(typ reflect.Type) string {
 	code := string(typeCode(typ))
 	switch code {
 	case "L":
-		return code + classNameFromTyp(typ) + ";"
+		return code + strings.ReplaceAll(classNameFromTyp(typ), ".", "/") + ";"
 	case "[":
 		return code + fieldDescriptor(unpackPointerType(typ.Elem()))
 	}
