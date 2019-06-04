@@ -36,6 +36,10 @@ func NewStreamWriter(w io.Writer) (*StreamWriter, error) {
 	return stream, nil
 }
 
+func (stream *StreamWriter) WriteObject(object interface{}) error {
+	return stream.writeObject(object)
+}
+
 func (stream *StreamWriter) classNameHolder(className string) struct{} {
 	holder, ok := stream.classNameHolders[className]
 	if !ok {
