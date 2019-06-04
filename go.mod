@@ -1,4 +1,4 @@
-module javaio
+module github.com/lujjjh/go-javaio
 
 go 1.12
 
