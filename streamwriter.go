@@ -226,6 +226,9 @@ func (stream *StreamWriter) fields(object interface{}) error {
 		// TODO: optimization.
 		var fieldName string
 		if tag := tf.Tag.Get("javaio"); tag != "" {
+			if tag == "-" {
+				continue
+			}
 			fieldName = tag
 		} else {
 			fieldName = lowerCamelCase(tf.Name)
@@ -319,6 +322,11 @@ func (stream *StreamWriter) nowrclass(object interface{}) error {
 		// Skip unexported fields.
 		if tf.PkgPath != "" {
 			continue
+		}
+		if tag := tf.Tag.Get("javaio"); tag != "" {
+			if tag == "-" {
+				continue
+			}
 		}
 		f := v.Field(i)
 		if err := stream.writeObject(f.Interface()); err != nil {
