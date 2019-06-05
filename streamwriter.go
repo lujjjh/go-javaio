@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"log"
 	"reflect"
 	"strings"
 	"unicode"
@@ -16,8 +17,12 @@ type classNameHolder struct {
 
 type StreamWriter struct {
 	io.Writer
-	handleMap        map[unsafe.Pointer]refElem
-	classNameHolders map[string]*classNameHolder
+	handleMap          map[unsafe.Pointer]refElem
+	classNameHolders   map[string]*classNameHolder
+	stringHolders      map[string]*string
+	blockDataMode      bool
+	blockDataBuffer    [1024]byte
+	blockDataBufferPos int
 }
 
 type WriteObjecter interface {
@@ -34,11 +39,75 @@ func NewStreamWriter(w io.Writer) (*StreamWriter, error) {
 		Writer:           w,
 		handleMap:        map[unsafe.Pointer]refElem{},
 		classNameHolders: make(map[string]*classNameHolder),
+		stringHolders:    make(map[string]*string),
 	}
 	if err := stream.writeHeader(); err != nil {
 		return nil, err
 	}
 	return stream, nil
+}
+
+func (stream *StreamWriter) Write(p []byte) (int, error) {
+	if !stream.blockDataMode {
+		return stream.Writer.Write(p)
+	}
+	l := len(p)
+	for l > 0 {
+		if stream.blockDataBufferPos >= len(stream.blockDataBuffer) {
+			if err := stream.flush(); err != nil {
+				return 0, err
+			}
+		}
+		wLen := l
+		if maxWLen := len(stream.blockDataBuffer) - stream.blockDataBufferPos; wLen > maxWLen {
+			wLen = maxWLen
+		}
+		copy(stream.blockDataBuffer[stream.blockDataBufferPos:], p[:wLen])
+		stream.blockDataBufferPos += wLen
+		l -= wLen
+	}
+	return len(p), nil
+}
+
+func (stream *StreamWriter) blockDataModeOn() {
+	stream.blockDataMode = true
+}
+
+func (stream *StreamWriter) blockDataModeOffAndFlush() error {
+	if err := stream.flush(); err != nil {
+		return err
+	}
+	stream.blockDataMode = false
+	return nil
+}
+
+func (stream *StreamWriter) flush() error {
+	if !stream.blockDataMode {
+		return nil
+	}
+	if stream.blockDataBufferPos == 0 {
+		return nil
+	}
+	if err := stream.writeBlockHeader(stream.blockDataBufferPos); err != nil {
+		return err
+	}
+	_, err := stream.Writer.Write(stream.blockDataBuffer[:stream.blockDataBufferPos])
+	if err != nil {
+		return err
+	}
+	stream.blockDataBufferPos = 0
+	return nil
+}
+
+func (stream *StreamWriter) writeBlockHeader(i int) error {
+	if i <= 0xFF {
+		_, err := stream.Writer.Write([]byte{TcBlockdata, byte(i)})
+		return err
+	}
+	if _, err := stream.Writer.Write([]byte{TcBlockdatalong}); err != nil {
+		return err
+	}
+	return binary.Write(stream.Writer, binary.BigEndian, int32(i))
 }
 
 func (stream *StreamWriter) WriteObject(object interface{}) error {
@@ -52,6 +121,15 @@ func (stream *StreamWriter) classNameHolder(className string) *classNameHolder {
 			ClassName: className,
 		}
 		stream.classNameHolders[className] = holder
+	}
+	return holder
+}
+
+func (stream *StreamWriter) stringHolder(s string) *string {
+	holder, ok := stream.stringHolders[s]
+	if !ok {
+		holder = &s
+		stream.stringHolders[s] = holder
 	}
 	return holder
 }
@@ -84,6 +162,25 @@ func (stream *StreamWriter) writeObject(object interface{}) error {
 	code := typeCode(unpackPointerType(v.Type()))
 	if code != '[' && code != 'L' {
 		return stream.writeBinary(v.Interface())
+	}
+
+	oldBlockDataMode := stream.blockDataMode
+	if err := stream.blockDataModeOffAndFlush(); err != nil {
+		return err
+	}
+	defer func() {
+		if oldBlockDataMode {
+			stream.blockDataModeOn()
+		}
+	}()
+	if v, ok := object.(*Serializable); ok {
+		object = v.Value
+	}
+	if v, ok := object.(*String); ok {
+		object = v.Value
+	}
+	if v, ok := object.(string); ok {
+		return stream.writeString(v)
 	}
 	return stream.writeRefOr(object, func() error {
 		switch code {
@@ -144,6 +241,7 @@ func className(object interface{}) string {
 	if classNamer, haveClassNamer := object.(ClassNamer); haveClassNamer {
 		return classNamer.ClassName()
 	}
+	log.Panicf("object %v does not implement ClassNamer", object)
 	return ""
 }
 
@@ -186,9 +284,9 @@ func classDescFlags(object interface{}) (flags byte) {
 	if writeObjecter(object) != nil {
 		flags |= ScWriteMethod
 	}
-	if sup := super(object); sup != nil {
-		flags |= classDescFlags(sup)
-	}
+	//if sup := super(object); sup != nil {
+	//	flags |= classDescFlags(sup)
+	//}
 	// TODO: Enum?...
 	return flags
 }
@@ -282,14 +380,15 @@ func (stream *StreamWriter) superClassDesc(object interface{}) error {
 }
 
 func (stream *StreamWriter) writeString(s string) error {
-	return stream.writeRefOr(s, func() error {
+	holder := stream.stringHolder(s)
+	return stream.writeRefOr(holder, func() error {
 		p := []byte(s)
 		l := len(p)
 		if l <= 0xFFFF {
 			if err := stream.writeBinary(TcString); err != nil {
 				return err
 			}
-			stream.newHandle(s)
+			stream.newHandle(holder)
 			return stream.writeUTF(s)
 		}
 		if err := stream.writeBinary(TcLongstring); err != nil {
@@ -301,10 +400,25 @@ func (stream *StreamWriter) writeString(s string) error {
 }
 
 func (stream *StreamWriter) classData(object interface{}) error {
+	if sup := super(object); sup != nil {
+		if err := stream.classData(sup); err != nil {
+			return err
+		}
+	}
 	flags := classDescFlags(object)
 	if flags&ScSerializable != 0 {
 		if flags&ScWriteMethod == 0 {
 			return stream.nowrclass(object)
+		} else {
+			stream.blockDataModeOn()
+			err := writeObjecter(object).WriteObject(stream)
+			if err != nil {
+				return err
+			}
+			if err := stream.blockDataModeOffAndFlush(); err != nil {
+				return err
+			}
+			return stream.writeBinary(TcEndblockdata)
 		}
 	}
 	return fmt.Errorf("classData: flags %d not supported", int(flags))
@@ -377,9 +491,10 @@ func typeCode(typ reflect.Type) byte {
 		typeCode = 'Z'
 	case reflect.Array, reflect.Slice:
 		typeCode = '['
-	case reflect.Struct:
+	case reflect.Struct, reflect.String:
 		typeCode = 'L'
 	default:
+		log.Panicf("unsupported type: %v", typ)
 	}
 	return typeCode
 }
