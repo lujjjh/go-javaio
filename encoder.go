@@ -15,8 +15,8 @@ type classNameHolder struct {
 	ClassName string
 }
 
-type StreamWriter struct {
-	io.Writer
+type Encoder struct {
+	w                  io.Writer
 	handleMap          map[unsafe.Pointer]refElem
 	classNameHolders   map[string]*classNameHolder
 	stringHolders      map[string]*string
@@ -25,8 +25,8 @@ type StreamWriter struct {
 	blockDataBufferPos int
 }
 
-type WriteObjecter interface {
-	WriteObject(writer *StreamWriter) error
+type ObjectWriter interface {
+	WriteObject(enc *Encoder) error
 }
 
 type Field struct {
@@ -34,9 +34,9 @@ type Field struct {
 	Typ  reflect.Type
 }
 
-func NewStreamWriter(w io.Writer) (*StreamWriter, error) {
-	stream := &StreamWriter{
-		Writer:           w,
+func NewEncoder(w io.Writer) (*Encoder, error) {
+	stream := &Encoder{
+		w:                w,
 		handleMap:        map[unsafe.Pointer]refElem{},
 		classNameHolders: make(map[string]*classNameHolder),
 		stringHolders:    make(map[string]*string),
@@ -47,130 +47,130 @@ func NewStreamWriter(w io.Writer) (*StreamWriter, error) {
 	return stream, nil
 }
 
-func (stream *StreamWriter) Write(p []byte) (int, error) {
-	if !stream.blockDataMode {
-		return stream.Writer.Write(p)
+func (enc *Encoder) Write(p []byte) (int, error) {
+	if !enc.blockDataMode {
+		return enc.w.Write(p)
 	}
 	l := len(p)
 	for l > 0 {
-		if stream.blockDataBufferPos >= len(stream.blockDataBuffer) {
-			if err := stream.flush(); err != nil {
+		if enc.blockDataBufferPos >= len(enc.blockDataBuffer) {
+			if err := enc.flush(); err != nil {
 				return 0, err
 			}
 		}
 		wLen := l
-		if maxWLen := len(stream.blockDataBuffer) - stream.blockDataBufferPos; wLen > maxWLen {
+		if maxWLen := len(enc.blockDataBuffer) - enc.blockDataBufferPos; wLen > maxWLen {
 			wLen = maxWLen
 		}
-		copy(stream.blockDataBuffer[stream.blockDataBufferPos:], p[:wLen])
-		stream.blockDataBufferPos += wLen
+		copy(enc.blockDataBuffer[enc.blockDataBufferPos:], p[:wLen])
+		enc.blockDataBufferPos += wLen
 		l -= wLen
 	}
 	return len(p), nil
 }
 
-func (stream *StreamWriter) blockDataModeOn() {
-	stream.blockDataMode = true
+func (enc *Encoder) blockDataModeOn() {
+	enc.blockDataMode = true
 }
 
-func (stream *StreamWriter) blockDataModeOffAndFlush() error {
-	if err := stream.flush(); err != nil {
+func (enc *Encoder) blockDataModeOffAndFlush() error {
+	if err := enc.flush(); err != nil {
 		return err
 	}
-	stream.blockDataMode = false
+	enc.blockDataMode = false
 	return nil
 }
 
-func (stream *StreamWriter) flush() error {
-	if !stream.blockDataMode {
+func (enc *Encoder) flush() error {
+	if !enc.blockDataMode {
 		return nil
 	}
-	if stream.blockDataBufferPos == 0 {
+	if enc.blockDataBufferPos == 0 {
 		return nil
 	}
-	if err := stream.writeBlockHeader(stream.blockDataBufferPos); err != nil {
+	if err := enc.writeBlockHeader(enc.blockDataBufferPos); err != nil {
 		return err
 	}
-	_, err := stream.Writer.Write(stream.blockDataBuffer[:stream.blockDataBufferPos])
+	_, err := enc.w.Write(enc.blockDataBuffer[:enc.blockDataBufferPos])
 	if err != nil {
 		return err
 	}
-	stream.blockDataBufferPos = 0
+	enc.blockDataBufferPos = 0
 	return nil
 }
 
-func (stream *StreamWriter) writeBlockHeader(i int) error {
+func (enc *Encoder) writeBlockHeader(i int) error {
 	if i <= 0xFF {
-		_, err := stream.Writer.Write([]byte{TcBlockdata, byte(i)})
+		_, err := enc.w.Write([]byte{TcBlockdata, byte(i)})
 		return err
 	}
-	if _, err := stream.Writer.Write([]byte{TcBlockdatalong}); err != nil {
+	if _, err := enc.w.Write([]byte{TcBlockdatalong}); err != nil {
 		return err
 	}
-	return binary.Write(stream.Writer, binary.BigEndian, int32(i))
+	return binary.Write(enc.w, binary.BigEndian, int32(i))
 }
 
-func (stream *StreamWriter) WriteObject(object interface{}) error {
-	return stream.writeObject(object)
+func (enc *Encoder) WriteObject(object interface{}) error {
+	return enc.writeObject(object)
 }
 
-func (stream *StreamWriter) classNameHolder(className string) *classNameHolder {
-	holder, ok := stream.classNameHolders[className]
+func (enc *Encoder) classNameHolder(className string) *classNameHolder {
+	holder, ok := enc.classNameHolders[className]
 	if !ok {
 		holder = &classNameHolder{
 			ClassName: className,
 		}
-		stream.classNameHolders[className] = holder
+		enc.classNameHolders[className] = holder
 	}
 	return holder
 }
 
-func (stream *StreamWriter) stringHolder(s string) *string {
-	holder, ok := stream.stringHolders[s]
+func (enc *Encoder) stringHolder(s string) *string {
+	holder, ok := enc.stringHolders[s]
 	if !ok {
 		holder = &s
-		stream.stringHolders[s] = holder
+		enc.stringHolders[s] = holder
 	}
 	return holder
 }
 
-func (stream *StreamWriter) writeBinary(values ...interface{}) error {
+func (enc *Encoder) writeBinary(values ...interface{}) error {
 	for _, value := range values {
-		if err := binary.Write(stream, binary.BigEndian, value); err != nil {
+		if err := binary.Write(enc, binary.BigEndian, value); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (stream *StreamWriter) writeHeader() error {
-	return stream.writeBinary(StreamMagic, StreamVersion)
+func (enc *Encoder) writeHeader() error {
+	return enc.writeBinary(StreamMagic, StreamVersion)
 }
 
-func (stream *StreamWriter) writeRefOr(object interface{}, f func() error) error {
-	if handle := stream.findHandle(object); handle != -1 {
-		return stream.writeBinary(TcReference, handle)
+func (enc *Encoder) writeRefOr(object interface{}, f func() error) error {
+	if handle := enc.findHandle(object); handle != -1 {
+		return enc.writeBinary(TcReference, handle)
 	}
 	return f()
 }
 
-func (stream *StreamWriter) writeObject(object interface{}) error {
+func (enc *Encoder) writeObject(object interface{}) error {
 	v := unpackPointer(reflect.ValueOf(object))
 	if !v.IsValid() {
-		return stream.writeBinary(TcNull)
+		return enc.writeBinary(TcNull)
 	}
 	code := typeCode(unpackPointerType(v.Type()))
 	if code != '[' && code != 'L' {
-		return stream.writeBinary(v.Interface())
+		return enc.writeBinary(v.Interface())
 	}
 
-	oldBlockDataMode := stream.blockDataMode
-	if err := stream.blockDataModeOffAndFlush(); err != nil {
+	oldBlockDataMode := enc.blockDataMode
+	if err := enc.blockDataModeOffAndFlush(); err != nil {
 		return err
 	}
 	defer func() {
 		if oldBlockDataMode {
-			stream.blockDataModeOn()
+			enc.blockDataModeOn()
 		}
 	}()
 	if v, ok := object.(*Serializable); ok {
@@ -180,29 +180,29 @@ func (stream *StreamWriter) writeObject(object interface{}) error {
 		object = v.Value
 	}
 	if v, ok := object.(string); ok {
-		return stream.writeString(v)
+		return enc.writeString(v)
 	}
-	return stream.writeRefOr(object, func() error {
+	return enc.writeRefOr(object, func() error {
 		switch code {
 		case 'L':
-			return stream.newObject(object)
+			return enc.newObject(object)
 		case '[':
-			return stream.newArray(object)
+			return enc.newArray(object)
 		default:
 			return fmt.Errorf("cannot serialize type: %T", object)
 		}
 	})
 }
 
-func (stream *StreamWriter) newObject(object interface{}) error {
-	if err := stream.writeBinary(TcObject); err != nil {
+func (enc *Encoder) newObject(object interface{}) error {
+	if err := enc.writeBinary(TcObject); err != nil {
 		return err
 	}
-	if err := stream.classDesc(object); err != nil {
+	if err := enc.classDesc(object); err != nil {
 		return err
 	}
-	stream.newHandle(object)
-	return stream.classData(object)
+	enc.newHandle(object)
+	return enc.classData(object)
 }
 
 func super(object interface{}) interface{} {
@@ -215,23 +215,23 @@ func super(object interface{}) interface{} {
 	return nil
 }
 
-func (stream *StreamWriter) classDesc(object interface{}) error {
+func (enc *Encoder) classDesc(object interface{}) error {
 	if object == nil {
-		return stream.writeBinary(TcNull)
+		return enc.writeBinary(TcNull)
 	}
-	return stream.writeRefOr(stream.classNameHolder(className(object)), func() error {
-		return stream.newClassDesc(object)
+	return enc.writeRefOr(enc.classNameHolder(className(object)), func() error {
+		return enc.newClassDesc(object)
 	})
 }
 
-func (stream *StreamWriter) writeUTF(s string) error {
+func (enc *Encoder) writeUTF(s string) error {
 	p := []byte(s)
-	return stream.writeBinary(uint16(len(p)), p)
+	return enc.writeBinary(uint16(len(p)), p)
 }
 
-func (stream *StreamWriter) writeLongUTF(s string) error {
+func (enc *Encoder) writeLongUTF(s string) error {
 	p := []byte(s)
-	return stream.writeBinary(uint64(len(p)), p)
+	return enc.writeBinary(uint64(len(p)), p)
 }
 
 func className(object interface{}) string {
@@ -255,25 +255,25 @@ func serialVersionUID(object interface{}) int64 {
 	return 0
 }
 
-func (stream *StreamWriter) newClassDesc(object interface{}) error {
-	if err := stream.writeBinary(TcClassdesc); err != nil {
+func (enc *Encoder) newClassDesc(object interface{}) error {
+	if err := enc.writeBinary(TcClassdesc); err != nil {
 		return err
 	}
-	if err := stream.writeUTF(className(object)); err != nil {
+	if err := enc.writeUTF(className(object)); err != nil {
 		return err
 	}
-	if err := stream.writeBinary(serialVersionUID(object)); err != nil {
+	if err := enc.writeBinary(serialVersionUID(object)); err != nil {
 		return err
 	}
-	stream.newHandle(stream.classNameHolder(className(object)))
-	if err := stream.classDescInfo(object); err != nil {
+	enc.newHandle(enc.classNameHolder(className(object)))
+	if err := enc.classDescInfo(object); err != nil {
 		return err
 	}
 	return nil
 }
 
-func writeObjecter(object interface{}) WriteObjecter {
-	if writeObjecter, haveWriteObjecter := object.(WriteObjecter); haveWriteObjecter {
+func writeObjecter(object interface{}) ObjectWriter {
+	if writeObjecter, haveWriteObjecter := object.(ObjectWriter); haveWriteObjecter {
 		return writeObjecter
 	}
 	return nil
@@ -291,23 +291,23 @@ func classDescFlags(object interface{}) (flags byte) {
 	return flags
 }
 
-func (stream *StreamWriter) classDescInfo(object interface{}) error {
-	if err := stream.writeBinary(classDescFlags(object)); err != nil {
+func (enc *Encoder) classDescInfo(object interface{}) error {
+	if err := enc.writeBinary(classDescFlags(object)); err != nil {
 		return err
 	}
-	if err := stream.fields(object); err != nil {
+	if err := enc.fields(object); err != nil {
 		return err
 	}
-	if err := stream.classAnnotation(object); err != nil {
+	if err := enc.classAnnotation(object); err != nil {
 		return err
 	}
-	if err := stream.superClassDesc(object); err != nil {
+	if err := enc.superClassDesc(object); err != nil {
 		return err
 	}
 	return nil
 }
 
-func (stream *StreamWriter) fields(object interface{}) error {
+func (enc *Encoder) fields(object interface{}) error {
 	v := unpackPointer(reflect.ValueOf(object))
 	if v.Kind() != reflect.Struct {
 		return fmt.Errorf("fields: object must be a struct")
@@ -336,11 +336,11 @@ func (stream *StreamWriter) fields(object interface{}) error {
 			Typ:  unpackPointerType(tf.Type),
 		})
 	}
-	if err := stream.writeBinary(int16(len(fields))); err != nil {
+	if err := enc.writeBinary(int16(len(fields))); err != nil {
 		return err
 	}
 	for _, field := range fields {
-		if err := stream.fieldDesc(field); err != nil {
+		if err := enc.fieldDesc(field); err != nil {
 			return err
 		}
 	}
@@ -355,76 +355,76 @@ func lowerCamelCase(name string) string {
 	return string(runes)
 }
 
-func (stream *StreamWriter) fieldDesc(field Field) error {
+func (enc *Encoder) fieldDesc(field Field) error {
 	typeCode := typeCode(field.Typ)
-	if err := stream.writeBinary(typeCode); err != nil {
+	if err := enc.writeBinary(typeCode); err != nil {
 		return err
 	}
-	if err := stream.writeUTF(field.Name); err != nil {
+	if err := enc.writeUTF(field.Name); err != nil {
 		return err
 	}
 	switch typeCode {
 	case 'L', '[':
-		return stream.writeString(fieldDescriptor(field.Typ))
+		return enc.writeString(fieldDescriptor(field.Typ))
 	}
 	return nil
 }
 
-func (stream *StreamWriter) classAnnotation(object interface{}) error {
+func (enc *Encoder) classAnnotation(object interface{}) error {
 	// TODO
-	return stream.writeBinary(TcEndblockdata)
+	return enc.writeBinary(TcEndblockdata)
 }
 
-func (stream *StreamWriter) superClassDesc(object interface{}) error {
-	return stream.classDesc(super(object))
+func (enc *Encoder) superClassDesc(object interface{}) error {
+	return enc.classDesc(super(object))
 }
 
-func (stream *StreamWriter) writeString(s string) error {
-	holder := stream.stringHolder(s)
-	return stream.writeRefOr(holder, func() error {
+func (enc *Encoder) writeString(s string) error {
+	holder := enc.stringHolder(s)
+	return enc.writeRefOr(holder, func() error {
 		p := []byte(s)
 		l := len(p)
 		if l <= 0xFFFF {
-			if err := stream.writeBinary(TcString); err != nil {
+			if err := enc.writeBinary(TcString); err != nil {
 				return err
 			}
-			stream.newHandle(holder)
-			return stream.writeUTF(s)
+			enc.newHandle(holder)
+			return enc.writeUTF(s)
 		}
-		if err := stream.writeBinary(TcLongstring); err != nil {
+		if err := enc.writeBinary(TcLongstring); err != nil {
 			return err
 		}
-		stream.newHandle(s)
-		return stream.writeLongUTF(s)
+		enc.newHandle(s)
+		return enc.writeLongUTF(s)
 	})
 }
 
-func (stream *StreamWriter) classData(object interface{}) error {
+func (enc *Encoder) classData(object interface{}) error {
 	if sup := super(object); sup != nil {
-		if err := stream.classData(sup); err != nil {
+		if err := enc.classData(sup); err != nil {
 			return err
 		}
 	}
 	flags := classDescFlags(object)
 	if flags&ScSerializable != 0 {
 		if flags&ScWriteMethod == 0 {
-			return stream.nowrclass(object)
+			return enc.nowrclass(object)
 		} else {
-			stream.blockDataModeOn()
-			err := writeObjecter(object).WriteObject(stream)
+			enc.blockDataModeOn()
+			err := writeObjecter(object).WriteObject(enc)
 			if err != nil {
 				return err
 			}
-			if err := stream.blockDataModeOffAndFlush(); err != nil {
+			if err := enc.blockDataModeOffAndFlush(); err != nil {
 				return err
 			}
-			return stream.writeBinary(TcEndblockdata)
+			return enc.writeBinary(TcEndblockdata)
 		}
 	}
 	return fmt.Errorf("classData: flags %d not supported", int(flags))
 }
 
-func (stream *StreamWriter) nowrclass(object interface{}) error {
+func (enc *Encoder) nowrclass(object interface{}) error {
 	v := unpackPointer(reflect.ValueOf(object))
 	if v.Kind() != reflect.Struct {
 		return fmt.Errorf("fields: object must be a struct")
@@ -443,28 +443,28 @@ func (stream *StreamWriter) nowrclass(object interface{}) error {
 			}
 		}
 		f := v.Field(i)
-		if err := stream.writeObject(f.Interface()); err != nil {
+		if err := enc.writeObject(f.Interface()); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (stream *StreamWriter) newArray(object interface{}) error {
+func (enc *Encoder) newArray(object interface{}) error {
 	array := NewArray(object)
-	if err := stream.writeBinary(TcArray); err != nil {
+	if err := enc.writeBinary(TcArray); err != nil {
 		return err
 	}
-	if err := stream.classDesc(array); err != nil {
+	if err := enc.classDesc(array); err != nil {
 		return err
 	}
-	stream.newHandle(object)
+	enc.newHandle(object)
 	l := array.Len()
-	if err := stream.writeBinary(int32(l)); err != nil {
+	if err := enc.writeBinary(int32(l)); err != nil {
 		return err
 	}
 	for i := 0; i < l; i++ {
-		if err := stream.writeObject(array.Index(i)); err != nil {
+		if err := enc.writeObject(array.Index(i)); err != nil {
 			return err
 		}
 	}
