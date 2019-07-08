@@ -430,17 +430,15 @@ func (enc *Encoder) nowrclass(object interface{}) error {
 		return fmt.Errorf("fields: object must be a struct")
 	}
 	numField := v.NumField()
+	t := v.Type()
 	for i := 0; i < numField; i++ {
-		t := v.Type()
 		tf := t.Field(i)
 		// Skip unexported fields.
 		if tf.PkgPath != "" {
 			continue
 		}
-		if tag := tf.Tag.Get("javaio"); tag != "" {
-			if tag == "-" {
-				continue
-			}
+		if tag := tf.Tag.Get("javaio"); tag == "-" {
+			continue
 		}
 		f := v.Field(i)
 		if err := enc.writeObject(f.Interface()); err != nil {
