@@ -132,7 +132,7 @@ func (dec *Decoder) assignHandle(v interface{}) int {
 
 func (dec *Decoder) readUTF() (string, error) {
 	var l uint16
-	if err := dec.readBinary(l); err != nil {
+	if err := dec.readBinary(&l); err != nil {
 		return "", err
 	}
 	p := make([]byte, l)
@@ -160,7 +160,7 @@ func (dec *Decoder) readHandle() (interface{}, error) {
 		return nil, err
 	}
 	handle -= baseWireHandle
-	if handle < 0 || int(handle) > len(dec.handles) {
+	if handle < 0 || int(handle) >= len(dec.handles) {
 		return nil, fmt.Errorf("invalid handle value: %d", handle+baseWireHandle)
 	}
 	return dec.handles[handle], nil
@@ -183,9 +183,19 @@ func (dec *Decoder) readString() (string, error) {
 		}
 		return s, nil
 	case TcString:
-		return dec.readUTF()
+		s, err := dec.readUTF()
+		if err != nil {
+			return "", nil
+		}
+		dec.assignHandle(s)
+		return s, nil
 	case TcLongstring:
-		return dec.readLongUTF()
+		s, err := dec.readLongUTF()
+		if err != nil {
+			return "", nil
+		}
+		dec.assignHandle(s)
+		return s, nil
 	default:
 		return "", fmt.Errorf("readString: invalid type code: %02X", tc)
 	}
@@ -253,7 +263,7 @@ func (dec *Decoder) readClassDescriptor(desc *classDesc) error {
 	if err := dec.readBinary(&numFields); err != nil {
 		return err
 	}
-	fields := make([]fieldDesc, int(numFields))
+	fields := make([]fieldDesc, 0, int(numFields))
 	for i := 0; i < int(numFields); i++ {
 		var tcode byte
 		if err := dec.readBinary(&tcode); err != nil {
@@ -277,6 +287,15 @@ func (dec *Decoder) readClassDescriptor(desc *classDesc) error {
 		})
 	}
 	desc.info.fields = fields
+
+	tc, err := dec.r.ReadByte()
+	if err != nil {
+		return err
+	}
+	if tc != TcEndblockdata {
+		return fmt.Errorf("readClassDescriptor: expected TC_ENDBLOCKDATA, got %02X", tc)
+	}
+
 	return nil
 }
 
@@ -320,23 +339,23 @@ func (dec *Decoder) readOrdinaryObject() (interface{}, error) {
 	if err != nil {
 		return nil, err
 	}
-	typ, err := dec.typFromFieldDescriptor(desc.name)
+	typ, err := dec.getTypeFromClassName(desc.name)
 	if err != nil {
 		return nil, err
 	}
 	object := reflect.New(typ)
-	dec.assignHandle(object)
+	dec.assignHandle(object.Interface())
 	if desc.info.flags&ScExternalizable != 0 {
 		return nil, errors.New("readOrdinaryObject: SC_EXTERNALIZABLE not implemented")
 	}
 	if err := dec.readSerialData(object, desc); err != nil {
 		return nil, err
 	}
-	return object, nil
+	return object.Interface(), nil
 }
 
 func (dec *Decoder) readSerialData(value reflect.Value, desc *classDesc) error {
-	value = reflect.Indirect(value)
+	value = unpackPointer(value)
 	if desc.info.superClassDesc != nil {
 		superVal := reflect.ValueOf(super(value.Interface()))
 		if err := dec.readSerialData(superVal, desc); err != nil {
@@ -348,14 +367,41 @@ func (dec *Decoder) readSerialData(value reflect.Value, desc *classDesc) error {
 	}
 	dataMap := make(map[string]interface{})
 	for _, field := range desc.info.fields {
-		v, err := dec.readObject()
-		if err != nil {
-			return err
+		var v interface{}
+		switch field.typeCode {
+		default:
+			fieldTyp, err := dec.typFromFieldDescriptor(string(field.typeCode))
+			if err != nil {
+				return err
+			}
+			fieldData := reflect.New(fieldTyp).Interface()
+			if err := dec.readBinary(fieldData); err != nil {
+				return err
+			}
+			v = reflect.Indirect(reflect.ValueOf(fieldData)).Interface()
+		case '[':
+			tc, err := dec.r.ReadByte()
+			if err != nil {
+				return err
+			}
+			if tc != TcArray {
+				return fmt.Errorf("readSerialData: expected TC_ARRAY, got %02X", tc)
+			}
+			v, err = dec.readArray()
+			if err != nil {
+				return err
+			}
+		case 'L':
+			var err error
+			v, err = dec.readObject()
+			if err != nil {
+				return err
+			}
 		}
 		dataMap[field.name] = v
 	}
-	if value.Kind() != reflect.Map {
-		return fmt.Errorf("readSerialData: value should be a map, got '%s'", value.Kind())
+	if value.Kind() != reflect.Struct {
+		return fmt.Errorf("readSerialData: value should be a struct, got '%s'", value.Kind())
 	}
 	numField := value.NumField()
 	t := value.Type()
@@ -377,11 +423,13 @@ func (dec *Decoder) readSerialData(value reflect.Value, desc *classDesc) error {
 			continue
 		}
 		fieldDataValue := reflect.ValueOf(fieldData)
-		f := reflect.Indirect(value.Field(i))
-		if !fieldDataValue.Type().AssignableTo(f.Type()) {
-			return fmt.Errorf("readSerialData: %s is not assignable to %s", fieldDataValue.Type(), f.Type())
+		if fieldDataValue.IsValid() {
+			f := value.Field(i)
+			if !fieldDataValue.Type().AssignableTo(f.Type()) {
+				return fmt.Errorf("readSerialData: %s is not assignable to %s", fieldDataValue.Type(), f.Type())
+			}
+			f.Set(fieldDataValue)
 		}
-		f.Set(fieldDataValue)
 	}
 	return nil
 }
@@ -410,11 +458,7 @@ func (dec *Decoder) typFromFieldDescriptor(fieldDesc string) (reflect.Type, erro
 			return nil, fmt.Errorf("typFromFieldDescriptor: expected ';', got '%c'", ch)
 		}
 		className := strings.ReplaceAll(fieldDesc[1:len(fieldDesc)-1], "/", ".")
-		typ, ok := dec.typs[className]
-		if !ok {
-			return nil, fmt.Errorf("typFromFieldDescriptor: class '%s' not registered", className)
-		}
-		return typ, nil
+		return dec.getTypeFromClassName(className)
 	case '[':
 		elemTyp, err := dec.typFromFieldDescriptor(fieldDesc[1:])
 		if err != nil {
@@ -424,4 +468,12 @@ func (dec *Decoder) typFromFieldDescriptor(fieldDesc string) (reflect.Type, erro
 	default:
 		return nil, fmt.Errorf("typFromFieldDescriptor: invalid field descriptor: %s", fieldDesc)
 	}
+}
+
+func (dec *Decoder) getTypeFromClassName(className string) (reflect.Type, error) {
+	typ, ok := dec.typs[className]
+	if !ok {
+		return nil, fmt.Errorf("typFromFieldDescriptor: class '%s' not registered", className)
+	}
+	return typ, nil
 }

@@ -2,7 +2,7 @@ package javaio
 
 import (
 	"bytes"
-	"log"
+	"reflect"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -29,5 +29,21 @@ func TestDecoder_ReadObject(t *testing.T) {
 	})
 	dec, err := NewDecoder(r)
 	assert.NoError(t, err)
-	log.Println(dec.ReadObject())
+	dec.RegisterType("List", reflect.TypeOf(List{}))
+
+	obj1, err := dec.ReadObject()
+	assert.NoError(t, err)
+	obj2, err := dec.ReadObject()
+	assert.NoError(t, err)
+
+	list2 := &List{
+		Value: 19,
+	}
+	list1 := &List{
+		Value: 17,
+		Next:  list2,
+	}
+
+	assert.Equal(t, list1, obj1)
+	assert.Equal(t, list2, obj2)
 }
