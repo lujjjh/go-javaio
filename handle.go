@@ -50,17 +50,17 @@ func unpackPointerType(t reflect.Type) reflect.Type {
 	return t
 }
 
-func (stream *StreamWriter) newHandle(object interface{}) {
+func (enc *Encoder) newHandle(object interface{}) {
 	v := reflect.ValueOf(object)
 	kind, pointer := kindAndPointer(v)
-	index := baseWireHandle + int32(len(stream.handleMap))
-	stream.handleMap[pointer] = refElem{kind, index}
+	index := baseWireHandle + int32(len(enc.handleMap))
+	enc.handleMap[pointer] = refElem{kind, index}
 }
 
-func (stream *StreamWriter) findHandle(object interface{}) int32 {
+func (enc *Encoder) findHandle(object interface{}) int32 {
 	v := reflect.ValueOf(object)
 	kind, pointer := kindAndPointer(v)
-	if elem, ok := stream.handleMap[pointer]; ok {
+	if elem, ok := enc.handleMap[pointer]; ok {
 		if elem.kind == kind {
 			return elem.index
 		}

@@ -20,7 +20,7 @@ func (*List) SerialVersionUID() int64 {
 	return 1
 }
 
-func TestStreamWriter_WriteObject_1(t *testing.T) {
+func TestEncoder_WriteObject_1(t *testing.T) {
 	list2 := &List{
 		Value: 19,
 	}
@@ -30,10 +30,10 @@ func TestStreamWriter_WriteObject_1(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	w, err := NewStreamWriter(&buf)
+	enc, err := NewEncoder(&buf)
 	assert.NoError(t, err)
-	assert.NoError(t, w.writeObject(list1))
-	assert.NoError(t, w.writeObject(list2))
+	assert.NoError(t, enc.writeObject(list1))
+	assert.NoError(t, enc.writeObject(list2))
 	assert.Equal(t, []byte{
 		0xac, 0xed, 0x00, 0x05, 0x73, 0x72, 0x00, 0x04, 0x4c, 0x69, 0x73, 0x74, 0x00, 0x00, 0x00, 0x00,
 		0x00, 0x00, 0x00, 0x01, 0x02, 0x00, 0x02, 0x49, 0x00, 0x05, 0x76, 0x61, 0x6c, 0x75, 0x65, 0x4c,
@@ -75,7 +75,7 @@ func (B) ClassName() string {
 	return "B"
 }
 
-func TestStreamWriter_WriteObject_2(t *testing.T) {
+func TestEncoder_WriteObject_2(t *testing.T) {
 	a := &A{
 		IntValue:    42,
 		LongValue:   -42,
@@ -83,9 +83,9 @@ func TestStreamWriter_WriteObject_2(t *testing.T) {
 	}
 	a.super.SerializableValue = &Serializable{Value: a}
 	var buf bytes.Buffer
-	w, err := NewStreamWriter(&buf)
+	enc, err := NewEncoder(&buf)
 	assert.NoError(t, err)
-	assert.NoError(t, w.WriteObject(a))
+	assert.NoError(t, enc.WriteObject(a))
 	assert.Equal(t, []byte{
 		0xac, 0xed, 0x00, 0x05, 0x73, 0x72, 0x00, 0x01, 0x41, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 		0x01, 0x02, 0x00, 0x03, 0x49, 0x00, 0x08, 0x69, 0x6e, 0x74, 0x56, 0x61, 0x6c, 0x75, 0x65, 0x4a,
