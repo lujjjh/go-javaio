@@ -355,10 +355,9 @@ func (dec *Decoder) readOrdinaryObject() (interface{}, error) {
 }
 
 func (dec *Decoder) readSerialData(value reflect.Value, desc *classDesc) error {
-	value = unpackPointer(value)
 	if desc.info.superClassDesc != nil {
 		superVal := reflect.ValueOf(super(value.Interface()))
-		if err := dec.readSerialData(superVal, desc); err != nil {
+		if err := dec.readSerialData(superVal, desc.info.superClassDesc); err != nil {
 			return err
 		}
 	}
@@ -400,6 +399,7 @@ func (dec *Decoder) readSerialData(value reflect.Value, desc *classDesc) error {
 		}
 		dataMap[field.name] = v
 	}
+	value = reflect.Indirect(value)
 	if value.Kind() != reflect.Struct {
 		return fmt.Errorf("readSerialData: value should be a struct, got '%s'", value.Kind())
 	}
