@@ -17,6 +17,17 @@ type Decoder struct {
 	unread        int
 }
 
+type ObjectReader interface {
+	ReadObject(dec *Decoder) error
+}
+
+func objectReader(object interface{}) ObjectReader {
+	if objectReader, haveObjectReader := object.(ObjectReader); haveObjectReader {
+		return objectReader
+	}
+	return nil
+}
+
 type classDesc struct {
 	name             string
 	serialVersionUID int64
@@ -55,28 +66,61 @@ func (dec *Decoder) Read(p []byte) (int, error) {
 	if !dec.blockDataMode {
 		return dec.r.Read(p)
 	}
+	if dec.unread == 0 {
+		if err := dec.readBlockHeader(); err != nil {
+			return 0, err
+		}
+	}
 	if len(p) > dec.unread {
 		return 0, errors.New("read out of block data")
 	}
 	n, err := dec.r.Read(p)
 	dec.unread -= n
-	if dec.unread <= 0 {
-		dec.blockDataMode = false
-	}
 	return n, err
+}
+
+func (dec *Decoder) readBlockHeader() error {
+	var tc byte
+	if err := binary.Read(dec.r, binary.BigEndian, &tc); err != nil {
+		return err
+	}
+	switch tc {
+	case TcBlockdata:
+		var l uint8
+		if err := binary.Read(dec.r, binary.BigEndian, &l); err != nil {
+			return err
+		}
+		dec.unread = int(l)
+	case TcBlockdatalong:
+		var l int32
+		if err := binary.Read(dec.r, binary.BigEndian, l); err != nil {
+			return err
+		}
+		if l < 0 {
+			return fmt.Errorf("readBlockHeader: invalid length: %d", l)
+		}
+		dec.unread = int(l)
+	default:
+		return fmt.Errorf("readBlockHeader: invalid type code: %02X", tc)
+	}
+	return nil
 }
 
 func (dec *Decoder) readByte() (byte, error) {
 	var p [1]byte
-	if _, err := dec.r.Read(p[:]); err != nil {
+	if _, err := dec.Read(p[:]); err != nil {
 		return 0, err
 	}
 	return p[0], nil
 }
 
+func (dec *Decoder) ReadBinary(dsts ...interface{}) error {
+	return dec.readBinary(dsts...)
+}
+
 func (dec *Decoder) readBinary(dsts ...interface{}) error {
 	for _, dst := range dsts {
-		if err := binary.Read(dec.r, binary.BigEndian, dst); err != nil {
+		if err := binary.Read(dec, binary.BigEndian, dst); err != nil {
 			return err
 		}
 	}
@@ -105,6 +149,12 @@ func (dec *Decoder) ReadObject() (interface{}, error) {
 }
 
 func (dec *Decoder) readObject() (interface{}, error) {
+	oldBlockDataMode := dec.blockDataMode
+	dec.blockDataMode = false
+	defer func() {
+		dec.blockDataMode = oldBlockDataMode
+	}()
+
 	tc, err := dec.readByte()
 	if err != nil {
 		return nil, err
@@ -369,76 +419,93 @@ func (dec *Decoder) readSerialData(value reflect.Value, desc *classDesc) error {
 			return err
 		}
 	}
+	if or := objectReader(value.Interface()); or != nil {
+		dec.blockDataMode = true
+		if err := or.ReadObject(dec); err != nil {
+			return err
+		}
+	} else {
+		dec.blockDataMode = false
+		dataMap := make(map[string]interface{})
+		for _, field := range desc.info.fields {
+			var v interface{}
+			switch field.typeCode {
+			default:
+				fieldTyp, err := dec.typFromFieldDescriptor(string(field.typeCode))
+				if err != nil {
+					return err
+				}
+				fieldData := reflect.New(fieldTyp).Interface()
+				if err := dec.readBinary(fieldData); err != nil {
+					return err
+				}
+				v = reflect.Indirect(reflect.ValueOf(fieldData)).Interface()
+			case '[':
+				tc, err := dec.readByte()
+				if err != nil {
+					return err
+				}
+				if tc != TcArray {
+					return fmt.Errorf("readSerialData: expected TC_ARRAY, got %02X", tc)
+				}
+				v, err = dec.readArray()
+				if err != nil {
+					return err
+				}
+			case 'L':
+				var err error
+				v, err = dec.readObject()
+				if err != nil {
+					return err
+				}
+			}
+			dataMap[field.name] = v
+		}
+		value = reflect.Indirect(value)
+		if value.Kind() != reflect.Struct {
+			return fmt.Errorf("readSerialData: value should be a struct, got '%s'", value.Kind())
+		}
+		numField := value.NumField()
+		t := value.Type()
+		for i := 0; i < numField; i++ {
+			tf := t.Field(i)
+			// Skip unexported fields.
+			if tf.PkgPath != "" {
+				continue
+			}
+			fieldName := tf.Tag.Get("javaio")
+			if fieldName == "-" {
+				continue
+			}
+			if fieldName == "" {
+				fieldName = lowerCamelCase(tf.Name)
+			}
+			fieldData, ok := dataMap[fieldName]
+			if !ok {
+				continue
+			}
+			fieldDataValue := reflect.ValueOf(fieldData)
+			if fieldDataValue.IsValid() {
+				f := value.Field(i)
+				if !fieldDataValue.Type().AssignableTo(f.Type()) {
+					return fmt.Errorf("readSerialData: %s is not assignable to %s", fieldDataValue.Type(), f.Type())
+				}
+				f.Set(fieldDataValue)
+			}
+		}
+	}
 	if desc.info.flags&ScWriteMethod != 0 {
-		return errors.New("readSerialData: SC_WRITE_METHOD not implemented")
+		tc, err := dec.readByte()
+		if err != nil {
+			return err
+		}
+		if tc != TcEndblockdata {
+			return fmt.Errorf("readSerialData: expected TC_ENDBLOCKDATA, got %02X", tc)
+		}
+	} else {
+		dec.blockDataMode = false
 	}
-	dataMap := make(map[string]interface{})
-	for _, field := range desc.info.fields {
-		var v interface{}
-		switch field.typeCode {
-		default:
-			fieldTyp, err := dec.typFromFieldDescriptor(string(field.typeCode))
-			if err != nil {
-				return err
-			}
-			fieldData := reflect.New(fieldTyp).Interface()
-			if err := dec.readBinary(fieldData); err != nil {
-				return err
-			}
-			v = reflect.Indirect(reflect.ValueOf(fieldData)).Interface()
-		case '[':
-			tc, err := dec.readByte()
-			if err != nil {
-				return err
-			}
-			if tc != TcArray {
-				return fmt.Errorf("readSerialData: expected TC_ARRAY, got %02X", tc)
-			}
-			v, err = dec.readArray()
-			if err != nil {
-				return err
-			}
-		case 'L':
-			var err error
-			v, err = dec.readObject()
-			if err != nil {
-				return err
-			}
-		}
-		dataMap[field.name] = v
-	}
-	value = reflect.Indirect(value)
-	if value.Kind() != reflect.Struct {
-		return fmt.Errorf("readSerialData: value should be a struct, got '%s'", value.Kind())
-	}
-	numField := value.NumField()
-	t := value.Type()
-	for i := 0; i < numField; i++ {
-		tf := t.Field(i)
-		// Skip unexported fields.
-		if tf.PkgPath != "" {
-			continue
-		}
-		fieldName := tf.Tag.Get("javaio")
-		if fieldName == "-" {
-			continue
-		}
-		if fieldName == "" {
-			fieldName = lowerCamelCase(tf.Name)
-		}
-		fieldData, ok := dataMap[fieldName]
-		if !ok {
-			continue
-		}
-		fieldDataValue := reflect.ValueOf(fieldData)
-		if fieldDataValue.IsValid() {
-			f := value.Field(i)
-			if !fieldDataValue.Type().AssignableTo(f.Type()) {
-				return fmt.Errorf("readSerialData: %s is not assignable to %s", fieldDataValue.Type(), f.Type())
-			}
-			f.Set(fieldDataValue)
-		}
-	}
+
 	return nil
 }
 
