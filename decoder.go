@@ -1,7 +1,6 @@
 package javaio
 
 import (
-	"bufio"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -11,7 +10,7 @@ import (
 )
 
 type Decoder struct {
-	r             *bufio.Reader
+	r             io.Reader
 	typs          map[string]reflect.Type
 	handles       []interface{}
 	blockDataMode bool
@@ -38,7 +37,7 @@ type fieldDesc struct {
 
 func NewDecoder(r io.Reader) (*Decoder, error) {
 	dec := &Decoder{
-		r:    bufio.NewReader(r),
+		r:    r,
 		typs: make(map[string]reflect.Type),
 	}
 	if err := dec.readHeader(); err != nil {
@@ -65,6 +64,14 @@ func (dec *Decoder) Read(p []byte) (int, error) {
 		dec.blockDataMode = false
 	}
 	return n, err
+}
+
+func (dec *Decoder) readByte() (byte, error) {
+	var p [1]byte
+	if _, err := dec.r.Read(p[:]); err != nil {
+		return 0, err
+	}
+	return p[0], nil
 }
 
 func (dec *Decoder) readBinary(dsts ...interface{}) error {
@@ -98,7 +105,7 @@ func (dec *Decoder) ReadObject() (interface{}, error) {
 }
 
 func (dec *Decoder) readObject() (interface{}, error) {
-	tc, err := dec.r.ReadByte()
+	tc, err := dec.readByte()
 	if err != nil {
 		return nil, err
 	}
@@ -108,10 +115,7 @@ func (dec *Decoder) readObject() (interface{}, error) {
 	case TcReference:
 		return dec.readHandle()
 	case TcString, TcLongstring:
-		if err := dec.r.UnreadByte(); err != nil {
-			return nil, err
-		}
-		s, err := dec.readString()
+		s, err := dec.readStringWithTc(tc)
 		if err != nil {
 			return nil, err
 		}
@@ -166,11 +170,7 @@ func (dec *Decoder) readHandle() (interface{}, error) {
 	return dec.handles[handle], nil
 }
 
-func (dec *Decoder) readString() (string, error) {
-	tc, err := dec.r.ReadByte()
-	if err != nil {
-		return "", err
-	}
+func (dec *Decoder) readStringWithTc(tc byte) (string, error) {
 	switch tc {
 	case TcReference:
 		v, err := dec.readHandle()
@@ -201,8 +201,16 @@ func (dec *Decoder) readString() (string, error) {
 	}
 }
 
+func (dec *Decoder) readString() (string, error) {
+	tc, err := dec.readByte()
+	if err != nil {
+		return "", err
+	}
+	return dec.readStringWithTc(tc)
+}
+
 func (dec *Decoder) readClassDesc() (*classDesc, error) {
-	tc, err := dec.r.ReadByte()
+	tc, err := dec.readByte()
 	if err != nil {
 		return nil, err
 	}
@@ -288,7 +296,7 @@ func (dec *Decoder) readClassDescriptor(desc *classDesc) error {
 	}
 	desc.info.fields = fields
 
-	tc, err := dec.r.ReadByte()
+	tc, err := dec.readByte()
 	if err != nil {
 		return err
 	}
@@ -379,7 +387,7 @@ func (dec *Decoder) readSerialData(value reflect.Value, desc *classDesc) error {
 			}
 			v = reflect.Indirect(reflect.ValueOf(fieldData)).Interface()
 		case '[':
-			tc, err := dec.r.ReadByte()
+			tc, err := dec.readByte()
 			if err != nil {
 				return err
 			}
