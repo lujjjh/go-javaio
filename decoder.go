@@ -312,6 +312,7 @@ func (dec *Decoder) readClassDescriptor(desc *classDesc) error {
 		return err
 	}
 	desc.serialVersionUID = suid
+	desc.info.flags = flags
 	if flags&ScEnum != 0 {
 		// TODO: support enum
 		return errors.New("readNonProxyDesc: does not support enum")
@@ -494,6 +495,7 @@ func (dec *Decoder) readSerialData(value reflect.Value, desc *classDesc) error {
 			}
 		}
 	}
+	dec.blockDataMode = false
 	if desc.info.flags&ScWriteMethod != 0 {
 		tc, err := dec.readByte()
 		if err != nil {
@@ -502,8 +504,6 @@ func (dec *Decoder) readSerialData(value reflect.Value, desc *classDesc) error {
 		if tc != TcEndblockdata {
 			return fmt.Errorf("readSerialData: expected TC_ENDBLOCKDATA, got %02X", tc)
 		}
-	} else {
-		dec.blockDataMode = false
 	}
 
 	return nil
