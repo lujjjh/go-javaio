@@ -377,7 +377,7 @@ func (dec *Decoder) readArray() (interface{}, error) {
 	if typ.Kind() != reflect.Slice {
 		return nil, fmt.Errorf("readArray: expected slice, got '%s'", typ.Kind())
 	}
-	array.value = reflect.MakeSlice(typ.Elem(), int(l), int(l))
+	array.value = reflect.MakeSlice(reflect.SliceOf(typ.Elem()), int(l), int(l))
 	for i := 0; i < int(l); i++ {
 		data, err := dec.readObject()
 		if err != nil {
