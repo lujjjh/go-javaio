@@ -49,7 +49,7 @@ func TestDecoder_ReadObject(t *testing.T) {
 }
 
 type ClassA struct {
-	Hello string
+	Hello *String
 }
 
 type ClassB struct {
@@ -92,6 +92,6 @@ func TestDecoder_ReadObjectWithCustomReadObject(t *testing.T) {
 	object, err := dec.ReadObject()
 	assert.NoError(t, err)
 	b := object.(*ClassB)
-	assert.Equal(t, "world", b.super.Hello)
+	assert.Equal(t, &String{Value: "world"}, b.super.Hello)
 	assert.Equal(t, int32(1), b.value)
 }

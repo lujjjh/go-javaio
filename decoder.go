@@ -163,13 +163,20 @@ func (dec *Decoder) readObject() (interface{}, error) {
 	case TcNull:
 		return nil, nil
 	case TcReference:
-		return dec.readHandle()
+		v, err := dec.readHandle()
+		if err != nil {
+			return nil, err
+		}
+		if s, ok := v.(string); ok {
+			v = &String{Value: s}
+		}
+		return v, nil
 	case TcString, TcLongstring:
 		s, err := dec.readStringWithTc(tc)
 		if err != nil {
 			return nil, err
 		}
-		return s, nil
+		return &String{Value: s}, nil
 	case TcArray:
 		return dec.readArray()
 	case TcObject:
@@ -377,7 +384,7 @@ func (dec *Decoder) readArray() (interface{}, error) {
 	if typ.Kind() != reflect.Slice {
 		return nil, fmt.Errorf("readArray: expected slice, got '%s'", typ.Kind())
 	}
-	array.value = reflect.MakeSlice(reflect.SliceOf(typ.Elem()), int(l), int(l))
+	array.value = reflect.MakeSlice(reflect.SliceOf(reflect.PtrTo(typ.Elem())), int(l), int(l))
 	for i := 0; i < int(l); i++ {
 		data, err := dec.readObject()
 		if err != nil {
