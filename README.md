@@ -14,7 +14,7 @@ specify the serialVersionUID of the class.
 
 For example, define a `List` struct:
 
-```
+```go
 type List struct {
 	Value int32
 	Next  *List
@@ -56,7 +56,7 @@ The resulting buffer contains:
 00000040  71 00 7e 00 03                                    |q.~..|
 ```
 
-## Todo List
+## Features
 
 - [x] Serialization
-- [ ] Deserialization
+- [x] Deserialization
