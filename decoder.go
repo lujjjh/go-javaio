@@ -17,7 +17,7 @@ type Decoder struct {
 	unread        int
 
 	curValue reflect.Value
-	curDesc *classDesc
+	curDesc  *classDesc
 }
 
 type ObjectReader interface {
@@ -96,7 +96,7 @@ func (dec *Decoder) readBlockHeader() error {
 		dec.unread = int(l)
 	case TcBlockdatalong:
 		var l int32
-		if err := binary.Read(dec.r, binary.BigEndian, l); err != nil {
+		if err := binary.Read(dec.r, binary.BigEndian, &l); err != nil {
 			return err
 		}
 		if l < 0 {
@@ -387,18 +387,28 @@ func (dec *Decoder) readArray() (interface{}, error) {
 	if typ.Kind() != reflect.Slice {
 		return nil, fmt.Errorf("readArray: expected slice, got '%s'", typ.Kind())
 	}
-	array.value = reflect.MakeSlice(reflect.SliceOf(reflect.PtrTo(typ.Elem())), int(l), int(l))
-	for i := 0; i < int(l); i++ {
-		data, err := dec.readObject()
-		if err != nil {
+	switch typ.Elem() {
+	// TODO: process other primitive types.
+	case reflect.TypeOf(byte(0)):
+		b := make([]byte, l)
+		if err := dec.readBinary(&b); err != nil {
 			return nil, err
 		}
-		dataVal := reflect.ValueOf(data)
-		elem := array.value.Index(i)
-		if !dataVal.Type().AssignableTo(elem.Type()) {
-			return nil, fmt.Errorf("readArray: type %s is not assignable to type %s", dataVal.Type(), elem.Type())
+		array.value = reflect.ValueOf(b)
+	default:
+		array.value = reflect.MakeSlice(reflect.SliceOf(reflect.PtrTo(typ.Elem())), int(l), int(l))
+		for i := 0; i < int(l); i++ {
+			data, err := dec.readObject()
+			if err != nil {
+				return nil, err
+			}
+			dataVal := reflect.ValueOf(data)
+			elem := array.value.Index(i)
+			if !dataVal.Type().AssignableTo(elem.Type()) {
+				return nil, fmt.Errorf("readArray: type %s is not assignable to type %s", dataVal.Type(), elem.Type())
+			}
+			elem.Set(dataVal)
 		}
-		elem.Set(dataVal)
 	}
 	return array, nil
 }
@@ -459,7 +469,7 @@ func (dec *Decoder) readSerialData(value reflect.Value, desc *classDesc) error {
 	return nil
 }
 
-func (dec *Decoder) DefaultReadFields() (err error ){
+func (dec *Decoder) DefaultReadFields() (err error) {
 	dec.blockDataMode = false
 	err = dec.defaultReadFields(dec.curValue, dec.curDesc)
 	dec.blockDataMode = true
@@ -528,6 +538,11 @@ func (dec *Decoder) defaultReadFields(value reflect.Value, desc *classDesc) erro
 		fieldDataValue := reflect.ValueOf(fieldData)
 		if fieldDataValue.IsValid() {
 			f := value.Field(i)
+			if f.Type() == reflect.TypeOf(&Serializable{}) && fieldDataValue.Type() != reflect.TypeOf(&Serializable{}) {
+				fieldDataValue = reflect.ValueOf(&Serializable{
+					Value: fieldData,
+				})
+			}
 			if !fieldDataValue.Type().AssignableTo(f.Type()) {
 				return fmt.Errorf("readSerialData: %s is not assignable to %s", fieldDataValue.Type(), f.Type())
 			}
