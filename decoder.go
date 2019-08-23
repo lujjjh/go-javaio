@@ -67,7 +67,7 @@ func (dec *Decoder) RegisterType(name string, typ reflect.Type) {
 
 func (dec *Decoder) Read(p []byte) (int, error) {
 	if !dec.blockDataMode {
-		return dec.r.Read(p)
+		return io.ReadFull(dec.r, p)
 	}
 	if dec.unread == 0 {
 		if err := dec.readBlockHeader(); err != nil {
@@ -77,7 +77,7 @@ func (dec *Decoder) Read(p []byte) (int, error) {
 	if len(p) > dec.unread {
 		return 0, errors.New("read out of block data")
 	}
-	n, err := dec.r.Read(p)
+	n, err := io.ReadFull(dec.r, p)
 	dec.unread -= n
 	return n, err
 }
