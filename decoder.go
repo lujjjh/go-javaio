@@ -74,11 +74,18 @@ func (dec *Decoder) Read(p []byte) (int, error) {
 			return 0, err
 		}
 	}
+	end := len(p)
 	if len(p) > dec.unread {
-		return 0, errors.New("read out of block data")
+		end = dec.unread
 	}
-	n, err := io.ReadFull(dec.r, p)
+	n, err := io.ReadFull(dec.r, p[:end])
 	dec.unread -= n
+	if err != nil {
+		return n, err
+	}
+	if end < len(p) {
+		return dec.Read(p[end:])
+	}
 	return n, err
 }
 
