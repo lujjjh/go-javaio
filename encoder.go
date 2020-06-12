@@ -30,8 +30,9 @@ type ObjectWriter interface {
 }
 
 type Field struct {
-	Name string
-	Typ  reflect.Type
+	Name  string
+	Typ   reflect.Type
+	Value reflect.Value
 }
 
 func NewEncoder(w io.Writer) (*Encoder, error) {
@@ -195,6 +196,35 @@ func (enc *Encoder) writeObject(object interface{}) error {
 }
 
 func (enc *Encoder) newObject(object interface{}) error {
+	if array, ok := object.(*Array); ok {
+		if err := enc.writeBinary(TcArray); err != nil {
+			return err
+		}
+		if err := enc.writeBinary(TcClassdesc); err != nil {
+			return err
+		}
+
+		if err := enc.writeClassDesc(array); err != nil {
+			return err
+		}
+		if err := enc.writeBinary(serialVersionUID(object)); err != nil {
+			return err
+		}
+		if err := enc.classDescInfo(object); err != nil {
+			return err
+		}
+		enc.newHandle(object)
+		l := array.Len()
+		if err := enc.writeBinary(int32(l)); err != nil {
+			return err
+		}
+		for i := 0; i < l; i++ {
+			if err := enc.writeObject(array.Index(i)); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 	if err := enc.writeBinary(TcObject); err != nil {
 		return err
 	}
@@ -203,6 +233,13 @@ func (enc *Encoder) newObject(object interface{}) error {
 	}
 	enc.newHandle(object)
 	return enc.classData(object)
+}
+
+func (enc *Encoder) writeClassDesc(array *Array) error {
+	if array.Len() < 1 {
+		return enc.writeBinary(TcNull)
+	}
+	return enc.writeUTF("[L" + classNameFromTyp(unpackPointerType(reflect.TypeOf(array.Index(0)))) + ";")
 }
 
 func super(object interface{}) interface{} {
@@ -332,19 +369,95 @@ func (enc *Encoder) fields(object interface{}) error {
 			fieldName = lowerCamelCase(tf.Name)
 		}
 		fields = append(fields, Field{
-			Name: fieldName,
-			Typ:  unpackPointerType(tf.Type),
+			Name:  fieldName,
+			Typ:   unpackPointerType(tf.Type),
+			Value: v.Field(i),
 		})
 	}
 	if err := enc.writeBinary(int16(len(fields))); err != nil {
 		return err
 	}
+
+	enc.sort(fields)
 	for _, field := range fields {
 		if err := enc.fieldDesc(field); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func (enc *Encoder) sort(fields []Field) {
+	len := len(fields)
+	if len < 2 {
+		return
+	}
+	if len >= 32 {
+		return
+	}
+	index := enc.compare(fields)
+	var pri Field
+	for ; index < len; index++ {
+		left := 0
+		right := index
+		mid := 0
+		pivot := fields[index]
+		for left < right {
+			mid = (left + right) >> 1
+			if !enc.compireTo(pivot, fields[mid]) {
+				right = mid
+				continue
+			}
+			left = mid + 1
+		}
+
+		n := index - left
+		switch n {
+		case 2:
+			fields[left+2] = fields[left+1]
+			fields[left+1] = fields[left]
+		case 1:
+			fields[left+1] = fields[left]
+		default:
+			var tmp Field
+			for i := 1; i <= n; i++ {
+				if pri.Typ == nil {
+					pri = fields[left+i]
+					fields[left+i] = fields[left+i-1]
+					continue
+				}
+				tmp = fields[left+i]
+				fields[left+i] = pri
+				pri = tmp
+			}
+		}
+		fields[left] = pivot
+	}
+}
+
+func (enc *Encoder) compare(fields []Field) int {
+	index := 1
+	for ; index < len(fields); index++ {
+		if !enc.compireTo(fields[index], fields[index-1]) {
+			break
+		}
+	}
+	if index == 0 {
+		index++
+	}
+	return index
+}
+
+func (enc *Encoder) compireTo(now, pri Field) bool {
+	code := now.Typ.Kind()
+	lastCode := pri.Typ.Kind()
+	primitive := code >= reflect.Bool && code <= reflect.Uint64 || code == reflect.Float32 || code == reflect.Float64
+	lastType := lastCode >= reflect.Bool && lastCode <= reflect.Uint64 || lastCode == reflect.Float32 || lastCode == reflect.Float64
+
+	if lastType == primitive {
+		return now.Name > pri.Name
+	}
+	return !primitive
 }
 
 func lowerCamelCase(name string) string {
@@ -356,7 +469,14 @@ func lowerCamelCase(name string) string {
 }
 
 func (enc *Encoder) fieldDesc(field Field) error {
+	if field.Typ.Kind() == reflect.Interface {
+		field.Typ = unpackPointerType(reflect.TypeOf(field.Value.Interface()))
+	}
 	typeCode := typeCode(field.Typ)
+	array, ok := field.Value.Interface().(*Array)
+	if ok {
+		typeCode = '['
+	}
 	if err := enc.writeBinary(typeCode); err != nil {
 		return err
 	}
@@ -365,6 +485,9 @@ func (enc *Encoder) fieldDesc(field Field) error {
 	}
 	switch typeCode {
 	case 'L', '[':
+		if array != nil {
+			return enc.writeString(array.ClassName())
+		}
 		return enc.writeString(fieldDescriptor(field.Typ))
 	}
 	return nil
@@ -431,6 +554,7 @@ func (enc *Encoder) nowrclass(object interface{}) error {
 	}
 	numField := v.NumField()
 	t := v.Type()
+	fields := make([]Field, 0, numField)
 	for i := 0; i < numField; i++ {
 		tf := t.Field(i)
 		// Skip unexported fields.
@@ -440,8 +564,15 @@ func (enc *Encoder) nowrclass(object interface{}) error {
 		if tag := tf.Tag.Get("javaio"); tag == "-" {
 			continue
 		}
-		f := v.Field(i)
-		if err := enc.writeObject(f.Interface()); err != nil {
+		fields = append(fields, Field{
+			Name:  lowerCamelCase(tf.Name),
+			Typ:   unpackPointerType(tf.Type),
+			Value: v.Field(i),
+		})
+	}
+	enc.sort(fields)
+	for _, f := range fields {
+		if err := enc.writeObject(f.Value.Interface()); err != nil {
 			return err
 		}
 	}
